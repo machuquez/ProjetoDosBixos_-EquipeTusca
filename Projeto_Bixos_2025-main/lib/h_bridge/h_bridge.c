@@ -1,4 +1,5 @@
 #include "h_bridge.h"
+#define LOG_LOCAL_LEVEL ESP_LOG_NONE
 
 //Inicializa os pinos da ESP (motores, PMW, standBy)
 void init_gpio(motor_side_t motor)

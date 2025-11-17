@@ -1,6 +1,8 @@
 #include "PID.h"
 #include "pid_ctrl.h"
 
+//#define LOG_LOCAL_LEVEL ESP_LOG_NONE
+
 const char *TAG_PID = "PID";
 const char *TAG_PID_CTRL = "PID CTRL";
 

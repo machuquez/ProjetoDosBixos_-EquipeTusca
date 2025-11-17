@@ -8,8 +8,10 @@
 #include "freertos/queue.h"
 #include "esp_log.h"
 
+
+#define LOG_LOCAL_LEVEL ESP_LOG_NONE
+
 // Filas para comunicação entre tasks
-QueueHandle_t rads_queue;
 QueueHandle_t target_rads_queue;
 
 // Handles dos encoders
@@ -22,7 +24,7 @@ const char* TAG_MAIN = "MAIN_ROBOT";
 
 void init_all()
 {
-    ESP_LOGI(TAG_MAIN, "Inicializando hardware...");
+    ESP_LOGI(TAG_MAIN, "Inicializando hardware..."); 
     
     init_gpio(LEFT_MOTOR);
     init_gpio(RIGHT_MOTOR);
@@ -30,47 +32,54 @@ void init_all()
     init_pwm(LEFT_MOTOR);
     init_pwm(RIGHT_MOTOR);
 
+    ESP_LOGI(TAG_MAIN, "Encoders..."); 
     left_encoder = init_encoder(ENCODER_LEFT);
     right_encoder = init_encoder(ENCODER_RIGHT);
 
-    init_uart_read();
-    init_uart_write();
+    ESP_LOGI(TAG_MAIN, "UART..."); 
+    init_uart(); 
     
-    ESP_LOGI(TAG_MAIN, "Hardware inicializado!");
+    ESP_LOGI(TAG_MAIN, "Hardware inicializado!"); 
 }
 
 // Task 1: Comunicação UART com ROS
 void uart_communication_task(void *pvParameters)
 {
-    target_rads_data_t target_rads;
+    target_rads_data_t target_rads_rcv;
     target_rads_data_t last_target_rads = {0, 0};
     rads_data_t current_rads;
     
-    ESP_LOGI(TAG_MAIN, "Task UART iniciada");
+    // Fator de conversão (pulsos -> rad/s)
+    const float conversion_factor = 0.00475 * 20.0; // 0.095
+    
+    ESP_LOGI(TAG_MAIN, "Task UART iniciada (Loop de 20Hz)"); 
     
     while(1) {
-        // 1. Receber comandos do ROS
-        target_rads = receive_data(&last_target_rads);
+        //Recebe comandos 
+        target_rads_rcv = receive_data(&last_target_rads);
         
-        // Se recebeu novo comando, enviar para a fila
-        if (target_rads.target_left_rads != last_target_rads.target_left_rads ||
-            target_rads.target_right_rads != last_target_rads.target_right_rads) {
+        //Verifica se o comando e novo
+        if (target_rads_rcv.target_left_rads != last_target_rads.target_left_rads ||
+            target_rads_rcv.target_right_rads != last_target_rads.target_right_rads) {
             
-            xQueueSend(target_rads_queue, &target_rads, 0);
-            ESP_LOGI(TAG_MAIN, "Comando ROS: L=%.3f, R=%.3f", 
-                    target_rads.target_left_rads, target_rads.target_right_rads);
+           //Envia comando novo para a Fila do PID
+            xQueueSend(target_rads_queue, &target_rads_rcv, 0);
+            ESP_LOGI(TAG_MAIN, "Novo Comando ROS -> Fila: L=%.3f, R=%.3f", 
+                    target_rads_rcv.target_left_rads, target_rads_rcv.target_right_rads);
+            
+            //Atualiza o ultimo comando valido
+            last_target_rads = target_rads_rcv;
         }
-        last_target_rads = target_rads;
+
+        // 5. Calcular velocidade atual (Odometria)
+        // Certifique-se que pulse_count() zera a contagem após ler
+        current_rads.left_rads = (float)pulse_count(left_encoder) * conversion_factor; // rad/s
+        current_rads.right_rads = (float)pulse_count(right_encoder) * conversion_factor; // rad/s
         
-        // 2. Coletar dados atuais para enviar ao ROS - USANDO SUAS FUNÇÕES ATUAIS
-        float conversion_rate = 0.00475;
-        current_rads.left_rads = pulse_count(left_encoder) * conversion_rate * 20.0; // rad/s
-        current_rads.right_rads = pulse_count(right_encoder) * conversion_rate * 20.0; // rad/s
-        
-        // 3. Enviar dados para ROS
+        // 6. Enviar odometria para o PC
         send_data(current_rads);
         
-        vTaskDelay(pdMS_TO_TICKS(50)); // 20Hz
+        vTaskDelay(pdMS_TO_TICKS(50)); // 20Hz 
     }
 }
 
@@ -79,48 +88,48 @@ void motor_control_task(void *pvParameters)
 {
     pid_ctrl_block_handle_t left_pid = init_pid(LEFT_MOTOR);
     pid_ctrl_block_handle_t right_pid = init_pid(RIGHT_MOTOR);
-    target_rads_data_t target_rads;
+    
+    // Armazena o último comando de velocidade recebido
+    target_rads_data_t current_target_rads = {0.0, 0.0};
 
-    ESP_LOGI(TAG_MAIN, "Task controle motor iniciada");
+    ESP_LOGI(TAG_MAIN, "Task controle motor iniciada (Loop de 50Hz)"); 
     
     while(1) {
-        // Verificar se há novo comando na fila
-        if(xQueueReceive(target_rads_queue, &target_rads, 0) == pdPASS) {
-            // Calcular PID para ambos os motores - USANDO SUA FUNÇÃO pid_calculate ATUAL
-            pid_calculate(left_pid, LEFT_MOTOR, target_rads.target_left_rads, &valpidL, left_encoder);
-            pid_calculate(right_pid, RIGHT_MOTOR, target_rads.target_right_rads, &valpidR, right_encoder);
-            
-            // A função pid_calculate já chama update_motor internamente!
-            // Não precisa chamar set_motor_speed separadamente
+        
+        // 1. Verifica se há um novo comando na fila 
+        if(xQueueReceive(target_rads_queue, &current_target_rads, 0) == pdPASS) {
+            // Novo comando recebido
+            ESP_LOGI(TAG_MAIN, "PID Task: Novo alvo recebido L=%.3f, R=%.3f", 
+                    current_target_rads.target_left_rads, current_target_rads.target_right_rads);
         }
         
-        vTaskDelay(pdMS_TO_TICKS(20)); // 50Hz
+        // 2. Executa o PID continuamente com o último comando recebido
+        //se nenhum comando foi recebido pega o ultimo ou 0.0
+        ESP_LOGI("Target","%.3f %.3f", current_target_rads.target_right_rads,current_target_rads.target_left_rads);
+        pid_calculate(left_pid, LEFT_MOTOR, current_target_rads.target_left_rads, &valpidL, left_encoder);
+        pid_calculate(right_pid, RIGHT_MOTOR, current_target_rads.target_right_rads, &valpidR, right_encoder);
+        
+        
+        vTaskDelay(pdMS_TO_TICKS(20)); // 50Hz (Frequência de controle)
     }
 }
 
 // Task 3: Monitoramento (debug)
 void monitoring_task(void *pvParameters)
 {
-    rads_data_t current_rads;
-    target_rads_data_t target_rads;
-    float conversion_rate = 0.00475;
+    target_rads_data_t target_rads_monitor;
     
-    ESP_LOGI(TAG_MAIN, "Task monitoramento iniciada");
+    ESP_LOGI(TAG_MAIN, "Task monitoramento iniciada (Loop de 1Hz)"); 
     
     while(1) {
-        // Ler estado atual 
-        current_rads.left_rads = pulse_count(left_encoder) * conversion_rate * 20.0;
-        current_rads.right_rads = pulse_count(right_encoder) * conversion_rate * 20.0;
         
-        // Tentar pegar último comando 
-        if(xQueuePeek(target_rads_queue, &target_rads, 0) == pdPASS) {
-            ESP_LOGI(TAG_MAIN, " Alvo: L=%.3f, R=%.3f | Medido: L=%.3f, R=%.3f | PID: L=%.1f, R=%.1f",
-                    target_rads.target_left_rads, target_rads.target_right_rads,
-                    current_rads.left_rads, current_rads.right_rads,
+        // Tentar pegar último comando da fila (sem remover)
+        if(xQueuePeek(target_rads_queue, &target_rads_monitor, 0) == pdPASS) {
+            ESP_LOGI(TAG_MAIN, "[MONITOR] Alvo: L=%.3f, R=%.3f | PID Saída: L=%.1f, R=%.1f",
+                    target_rads_monitor.target_left_rads, target_rads_monitor.target_right_rads,
                     valpidL, valpidR);
         } else {
-            ESP_LOGI(TAG_MAIN, " Medido: L=%.3f, R=%.3f | PID: L=%.1f, R=%.1f",
-                    current_rads.left_rads, current_rads.right_rads,
+            ESP_LOGI(TAG_MAIN, "[MONITOR] Alvo: (Sem novos) | PID Saída: L=%.1f, R=%.1f",
                     valpidL, valpidR);
         }
         
@@ -130,32 +139,26 @@ void monitoring_task(void *pvParameters)
 
 void app_main()
 {
-    vTaskDelay(pdMS_TO_TICKS(10000));
-    ESP_LOGI(TAG_MAIN, "INICIANDO...");
+    ESP_LOGI(TAG_MAIN, "INICIANDO..."); 
     
     // 1. Inicializar hardware
-    init_all();
+   init_all();
     
-    // 2. Criar filas
-    rads_queue = xQueueCreate(10, sizeof(rads_data_t));
+    // 2. Criar fila
     target_rads_queue = xQueueCreate(10, sizeof(target_rads_data_t));
     
-    if (rads_queue == NULL || target_rads_queue == NULL) {
-        ESP_LOGE(TAG_MAIN, "Erro criando filas!");
+    if (target_rads_queue == NULL) {
+        ESP_LOGE(TAG_MAIN, "Erro criando fila target_rads_queue!");
         return;
     }
     
     // 3. Criar tasks
-    xTaskCreatePinnedToCore(uart_communication_task, "uart_comm", 4096, NULL, 3, NULL, 1);
-    xTaskCreatePinnedToCore(motor_control_task, "motor_ctrl", 4096, NULL, 4, NULL, 1);
-    xTaskCreate(monitoring_task, "monitor", 4096, NULL, 1, NULL);
+    xTaskCreatePinnedToCore(uart_communication_task, "uart_comm", 4096, NULL, 5, NULL, 1);
+    xTaskCreatePinnedToCore(motor_control_task, "motor_ctrl", 4096, NULL, 10, NULL, 0); 
+    xTaskCreate(monitoring_task, "monitor", 4096, NULL, 1, NULL); 
     
     ESP_LOGI(TAG_MAIN, "Sistema inicializado! Pronto para comunicação ROS.");
-    ESP_LOGI(TAG_MAIN, "Aguardando comandos no /cmd_vel...");
     
-    // Task principal fica vazia
-    while(1) {
-        vTaskDelay(pdMS_TO_TICKS(10000)); // 10 segundos
-    }
+    // Task principal não faz mais nada
+    vTaskSuspend(NULL); 
 }
-    

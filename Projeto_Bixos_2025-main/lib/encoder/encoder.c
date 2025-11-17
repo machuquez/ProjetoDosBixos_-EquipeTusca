@@ -1,5 +1,7 @@
 #include "encoder.h"
 
+#define LOG_LOCAL_LEVEL ESP_LOG_NONE
+
 const char *TAG_ENCODER = "Encoder";
 
 //Configura e inicializa o encoder (retorna o 'pcnt_unit_handle_t' pronto)

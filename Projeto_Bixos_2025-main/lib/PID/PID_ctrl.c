@@ -10,6 +10,9 @@
 #include "esp_log.h"
 #include "pid_ctrl.h"
 
+#define LOG_LOCAL_LEVEL ESP_LOG_NONE
+
+
 static const char *TAG = "pid_ctrl";
 
 typedef struct pid_ctrl_block_t pid_ctrl_block_t;

@@ -10,7 +10,7 @@ from hardware_interface import RobotHardwareInterface # type: ignore
 
 
 WHEEL_SEPARATION = 0.30 # 30 cm distancia entre as rodas (definir)
-WHEEL_RADIUS = 0.05    # 5 cm teste raio da roda 
+WHEEL_RADIUS = 0.05     # 5 cm teste raio da roda 
 
 
 class RobotDriverNode:
@@ -41,9 +41,20 @@ class RobotDriverNode:
 
         # timer p mandar odometria a 20hz
         rospy.Timer(rospy.Duration(1.0 / 20.0), self.publish_odometry)
-
+        #timer p zerar a velocidade caso n receba
+        self.watchdog_timer = None # O timer de timeout
+        self.watchdog_timeout = 0.5 # 0.5 segundos
+        
 
     def cmd_vel_callback(self, msg):
+    
+        if self.watchdog_timer:
+            self.watchdog_timer.shutdown()
+        
+        # 2. Cria um NOVO timer one-shot
+        self.watchdog_timer = rospy.Timer(rospy.Duration(self.watchdog_timeout), self.reduce_velocity, oneshot=True)
+        
+        
         # callback p toda vez q um comando de velocidade chega no /cmd_vel
 
         linear_vel = msg.linear.x
@@ -55,7 +66,13 @@ class RobotDriverNode:
         
         self.hw_interface.send_velocity_command(left_wheel_vel, right_wheel_vel)
 
-
+    
+    def reduce_velocity(self, event=None):
+        rospy.logwarn("Timeout do cmd_vel! Parando o robô.") # Bom adicionar um log
+        # Envie o comando de PARADA
+        self.hw_interface.send_velocity_command(0.0, 0.0)
+        
+    
     def publish_odometry(self, event=None):
         # função chamada pelo timer p ler estado do hardware
         # calcular odomtria e mandar no ROS
